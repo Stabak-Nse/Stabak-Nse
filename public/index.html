@@ -964,41 +964,9 @@ function renderStrategies(type){
 // ═══════════════════════════════════════════════════════
 let sectorChartInst=null;
 async function loadIndices(){
-  const data=await nfetch('/api/allIndices');
-  const list=data.data||[];
-  if(!list.length)throw new Error('Empty indices');
-  const find=(...names)=>list.find(i=>names.some(n=>(i.index||'').toUpperCase().includes(n.toUpperCase())));
-
-  function applyIdx(prefix,idx){
-    if(!idx)return;
-    const v=parseFloat(idx.last||0),c=parseFloat(idx.change||0),p=parseFloat(idx.percentChange||0);
-    const col=c>=0?'var(--green)':'var(--red)';
-    const sign=c>=0?'▲ +':'▼ ';
-    [`h-${prefix}`,`s-${prefix}`,`st-${prefix}`,'sensex-big','nifty-big'].forEach(id=>{
-      if(id==='sensex-big'&&prefix!=='sensex')return;
-      if(id==='nifty-big'&&prefix!=='nifty')return;
-      if(document.getElementById(id)){document.getElementById(id).textContent=fmt(v);document.getElementById(id).style.color=col;}
-    });
-    [`h-${prefix}-c`,`s-${prefix}-c`,`st-${prefix}-c`].forEach(id=>{
-      if(document.getElementById(id)){document.getElementById(id).textContent=sign+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)';document.getElementById(id).className='c '+(c>=0?'up':'dn');}
-    });
-    if(prefix==='sensex'){setEl('sensex-chg-big',(c>=0?'▲ +':'▼ ')+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)',col);}
-    if(prefix==='nifty'){setEl('nifty-chg-big',(c>=0?'▲ +':'▼ ')+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)',col);}
-  }
-
-  applyIdx('nifty', find('NIFTY 50'));
-  applyIdx('bank',  find('NIFTY BANK'));
-  applyIdx('it',    find('NIFTY IT'));
-  applyIdx('fmcg',  find('NIFTY FMCG'));
-  applyIdx('realty',find('NIFTY REALTY'));
-  applyIdx('vix',   find('INDIA VIX'));
-
-  // SENSEX from BSE index in allIndices
-  const sensex = find('SENSEX','S&P BSE SENSEX');
-  applyIdx('sensex', sensex);
-
-  renderSectorChart(list);
-  buildTicker(list);
+  const data = await cachedFetch('/api/allIndices','indices');
+  if(!(data.data||[]).length) throw new Error('Empty indices');
+  processIndices(data);
 }
 
 function renderSectorChart(list){
@@ -1023,12 +991,10 @@ function buildTicker(list){
 let nifty50Data=[];
 async function loadNifty50(){
   const wrap=document.getElementById('movers-wrap');
-  wrap.innerHTML='<div class="loading"><div class="spin"></div>Loading...</div>';
+  if(!nifty50Data.length) wrap.innerHTML='<div class="loading"><div class="spin"></div>Loading...</div>';
   try{
-    const data=await nfetch('/api/equity-stockIndices?index=NIFTY%2050');
-    nifty50Data=(data.data||[]).filter(s=>s.symbol&&s.symbol!=='NIFTY 50');
-    buildNiftyChart(parseFloat(nifty50Data[0]?.lastPrice)||23492);
-    renderMovers();
+    const data=await cachedFetch('/api/equity-stockIndices?index=NIFTY%2050','nifty50');
+    processNifty50(data);
   }catch(e){wrap.innerHTML='<div class="err-box">Could not load: '+e.message+'</div>';buildNiftyChart(23492);}
 }
 
@@ -1220,18 +1186,92 @@ document.querySelectorAll('.tab').forEach(btn=>{btn.addEventListener('click',()=
 // ═══════════════════════════════════════════════════════
 // FETCH ALL
 // ═══════════════════════════════════════════════════════
-async function fetchAll(){
-  try{await loadIndices();await loadNifty50();setNSEStatus(true,'Live ✓');}
-  catch(e){setNSEStatus(false,'Error: '+e.message);}
+// ── CLIENT-SIDE CACHE ──
+const CLIENT_CACHE = new Map();
+const CLIENT_TTL = { indices: 25000, nifty50: 25000, default: 40000 };
+
+async function cachedFetch(path, ttlKey) {
+  const key = path;
+  const entry = CLIENT_CACHE.get(key);
+  const ttl = CLIENT_TTL[ttlKey] || CLIENT_TTL.default;
+  if (entry && Date.now() - entry.ts < ttl) return entry.data;
+  const data = await nfetch(path);
+  CLIENT_CACHE.set(key, { data, ts: Date.now() });
+  return data;
 }
 
-setInterval(fetchAll,60000);
+// ── PARALLEL FETCH ALL ──
+async function fetchAll() {
+  const t = Date.now();
+  try {
+    // Fire BOTH requests simultaneously
+    const [idxData, niftyData] = await Promise.all([
+      cachedFetch('/api/allIndices', 'indices'),
+      cachedFetch('/api/equity-stockIndices?index=NIFTY%2050', 'nifty50')
+    ]);
+    processIndices(idxData);
+    processNifty50(niftyData);
+    setNSEStatus(true, 'Live ✓ (' + (Date.now()-t) + 'ms)');
+  } catch(e) {
+    setNSEStatus(false, 'Error: ' + e.message);
+  }
+}
 
-window.addEventListener('DOMContentLoaded',()=>{
+function processIndices(data) {
+  const list = data.data || [];
+  if (!list.length) return;
+  const find = (...names) => list.find(i => names.some(n => (i.index||'').toUpperCase().includes(n.toUpperCase())));
+  function applyIdx(prefix, idx) {
+    if (!idx) return;
+    const v=parseFloat(idx.last||0),c=parseFloat(idx.change||0),p=parseFloat(idx.percentChange||0);
+    const col=c>=0?'var(--green)':'var(--red)';
+    const sign=c>=0?'▲ +':'▼ ';
+    [`h-${prefix}`,`s-${prefix}`,`st-${prefix}`].forEach(id=>{
+      if(document.getElementById(id)){document.getElementById(id).textContent=fmt(v);document.getElementById(id).style.color=col;}
+    });
+    [`h-${prefix}-c`,`s-${prefix}-c`,`st-${prefix}-c`].forEach(id=>{
+      if(document.getElementById(id)){document.getElementById(id).textContent=sign+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)';document.getElementById(id).className='c '+(c>=0?'up':'dn');}
+    });
+    if(prefix==='sensex'){setEl('sensex-big',fmt(v),col);setEl('sensex-chg-big',(c>=0?'▲ +':'▼ ')+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)',col);}
+    if(prefix==='nifty'){setEl('nifty-big',fmt(v),col);setEl('nifty-chg-big',(c>=0?'▲ +':'▼ ')+fmt(Math.abs(c))+' ('+p.toFixed(2)+'%)',col);}
+  }
+  applyIdx('nifty', find('NIFTY 50'));
+  applyIdx('bank',  find('NIFTY BANK'));
+  applyIdx('it',    find('NIFTY IT'));
+  applyIdx('fmcg',  find('NIFTY FMCG'));
+  applyIdx('realty',find('NIFTY REALTY'));
+  applyIdx('vix',   find('INDIA VIX'));
+  applyIdx('sensex',find('SENSEX','S&P BSE SENSEX'));
+  renderSectorChart(list);
+  buildTicker(list);
+}
+
+function processNifty50(data) {
+  nifty50Data = (data.data||[]).filter(s=>s.symbol&&s.symbol!=='NIFTY 50');
+  const base = parseFloat(nifty50Data[0]?.lastPrice)||23492;
+  buildNiftyChart(base);
+  renderMovers();
+}
+
+// ── SMART AUTO-REFRESH ──
+// Refresh fast when tab is visible, pause when hidden
+let refreshTimer = null;
+function startRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => {
+    if (!document.hidden) fetchAll();
+  }, 30000); // every 30s when visible
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) fetchAll(); // immediate refresh on tab focus
+});
+
+window.addEventListener('DOMContentLoaded', () => {
   fetchAll();
   renderSig();
-  // Pre-load all stocks in background
-  setTimeout(loadAllStocks, 2000);
+  startRefresh();
+  // Load all stocks in background after 1.5s
+  setTimeout(loadAllStocks, 1500);
 });
 </script>
 </body>
