@@ -495,11 +495,11 @@ tr:hover td{background:rgba(0,200,255,0.02)}
 // ═══════════════════════════════════════════════════════
 
 const NSE_BASE = 'https://www.nseindia.com';
-let PROXY_URL = localStorage.getItem('nse_proxy_url') || '';
+let PROXY_URL = localStorage.getItem('nse_proxy_url') || 'https://stabak-nse.vercel.app';
 
 // Load saved proxy URL into input
 if (PROXY_URL) {
-  document.getElementById('proxy-url-input').value = PROXY_URL;
+  document.getElementById('proxy-url-input').value = PROXY_URL || 'https://stabak-nse.vercel.app';
 }
 
 function saveProxyURL() {
