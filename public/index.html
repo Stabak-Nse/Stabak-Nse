@@ -1186,36 +1186,63 @@ document.querySelectorAll('.tab').forEach(btn=>{btn.addEventListener('click',()=
 // ═══════════════════════════════════════════════════════
 // FETCH ALL
 // ═══════════════════════════════════════════════════════
-// ── CLIENT-SIDE CACHE ──
-const CLIENT_CACHE = new Map();
-const CLIENT_TTL = { indices: 25000, nifty50: 25000, default: 40000 };
+// ═══════════════════════════════════════════════════════
+// CLIENT-SIDE CACHE + STALE-WHILE-REVALIDATE
+// Shows cached data instantly, refreshes in background
+// ═══════════════════════════════════════════════════════
+const CC = new Map(); // {data, ts}
+const CC_TTL = { indices:28000, nifty50:28000, default:50000 };
 
-async function cachedFetch(path, ttlKey) {
-  const key = path;
-  const entry = CLIENT_CACHE.get(key);
-  const ttl = CLIENT_TTL[ttlKey] || CLIENT_TTL.default;
-  if (entry && Date.now() - entry.ts < ttl) return entry.data;
-  const data = await nfetch(path);
-  CLIENT_CACHE.set(key, { data, ts: Date.now() });
-  return data;
+// Returns cached data immediately if available, fetches in background
+function smartFetch(path, ttlKey) {
+  const ttl = CC_TTL[ttlKey] || CC_TTL.default;
+  const hit = CC.get(path);
+  const fresh = hit && (Date.now() - hit.ts < ttl);
+  // Background refresh if stale
+  if (hit && !fresh) {
+    nfetch(path).then(d => { CC.set(path, {data:d, ts:Date.now()}); }).catch(()=>{});
+  }
+  if (hit) return Promise.resolve(hit.data); // instant from cache
+  // No cache — must fetch
+  return nfetch(path).then(d => { CC.set(path, {data:d, ts:Date.now()}); return d; });
 }
 
-// ── PARALLEL FETCH ALL ──
+// Persist cache to sessionStorage so page reload is instant
+function saveCache() {
+  try {
+    const obj = {};
+    CC.forEach((v,k) => { obj[k] = v; });
+    sessionStorage.setItem('nse_cache', JSON.stringify(obj));
+  } catch(e) {}
+}
+function loadCache() {
+  try {
+    const raw = sessionStorage.getItem('nse_cache');
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    Object.entries(obj).forEach(([k,v]) => CC.set(k, v));
+  } catch(e) {}
+}
+
+// ── PARALLEL FETCH ALL — instant if cached ──
 async function fetchAll() {
   const t = Date.now();
   try {
-    // Fire BOTH requests simultaneously
     const [idxData, niftyData] = await Promise.all([
-      cachedFetch('/api/allIndices', 'indices'),
-      cachedFetch('/api/equity-stockIndices?index=NIFTY%2050', 'nifty50')
+      smartFetch('/api/allIndices', 'indices'),
+      smartFetch('/api/equity-stockIndices?index=NIFTY%2050', 'nifty50'),
     ]);
     processIndices(idxData);
     processNifty50(niftyData);
-    setNSEStatus(true, 'Live ✓ (' + (Date.now()-t) + 'ms)');
+    saveCache();
+    const ms = Date.now()-t;
+    setNSEStatus(true, ms < 100 ? 'Live ✓ (cached)' : 'Live ✓ (' + ms + 'ms)');
   } catch(e) {
     setNSEStatus(false, 'Error: ' + e.message);
   }
 }
+
+async function cachedFetch(path, ttlKey) { return smartFetch(path, ttlKey); }
 
 function processIndices(data) {
   const list = data.data || [];
@@ -1259,19 +1286,31 @@ let refreshTimer = null;
 function startRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
-    if (!document.hidden) fetchAll();
-  }, 30000); // every 30s when visible
+    if (!document.hidden) {
+      fetchAll();
+      // Also refresh OI if on that tab
+      const oiPanel = document.getElementById('panel-oi');
+      if (oiPanel && oiPanel.classList.contains('active')) loadOI();
+    }
+  }, 30000);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) fetchAll(); // immediate refresh on tab focus
+  if (!document.hidden) {
+    // Clear cache age so we get fresh on focus
+    ['indices','nifty50'].forEach(k => {
+      const ep = k==='indices'?'/api/allIndices':'/api/equity-stockIndices?index=NIFTY%2050';
+      const e = CC.get(ep); if (e) e.ts = 0; // force refresh
+    });
+    fetchAll();
+  }
 });
 
 window.addEventListener('DOMContentLoaded', () => {
-  fetchAll();
+  loadCache();          // Restore cache from sessionStorage instantly
+  fetchAll();           // Then fetch fresh in background
   renderSig();
   startRefresh();
-  // Load all stocks in background after 1.5s
-  setTimeout(loadAllStocks, 1500);
+  setTimeout(loadAllStocks, 1000);
 });
 </script>
 </body>
